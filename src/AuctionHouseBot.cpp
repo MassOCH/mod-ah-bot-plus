@@ -31,6 +31,8 @@
 #include "SpellMgr.h"
 #include <cmath>
 
+#include <algorithm>
+#include <cctype>
 #include <set>
 #include <unordered_map>
 
@@ -41,6 +43,8 @@ AuctionHouseBot::AuctionHouseBot() :
     debug_Out_Filters(false),
     SellingBotEnabled(false),
     BuyingBotEnabled(false),
+    UsePlayerbotNames(false),
+    PlayerbotAccountPrefix(""),
     ReturnExpiredAuctionItemsToBot(false),
     CyclesBetweenBuyActionMin(1),
     CyclesBetweenBuyAction(1),
@@ -1016,7 +1020,7 @@ uint32 AuctionHouseBot::GetRandomItemIDForListing()
     return ItemCandidatesByItemClassAndQuality[listProportionNode.ItemClassID][listProportionNode.ItemQualityID][urand(0, numOfValidItemsInGroup-1)];
 }
 
-void AuctionHouseBot::AddNewAuctions(std::vector<Player*> AHBPlayers, FactionSpecificAuctionHouseConfig *config)
+void AuctionHouseBot::AddNewAuctions(std::vector<ObjectGuid> const& sellerGUIDs, FactionSpecificAuctionHouseConfig *config)
 {
     if (!SellingBotEnabled)
     {
@@ -1146,16 +1150,21 @@ void AuctionHouseBot::AddNewAuctions(std::vector<Player*> AHBPlayers, FactionSpe
                 }
             }
 
-            Player* AHBplayer = AHBPlayers[urand(0, AHBPlayers.size() - 1)];
+            ObjectGuid sellerGUID = sellerGUIDs[urand(0, sellerGUIDs.size() - 1)];
 
-            Item* item = Item::CreateItem(itemID, 1, AHBplayer);
+            // Created without an owning Player, as the item goes straight into an auction rather
+            // than into anyone's inventory. The owner is assigned further below, immediately before
+            // the item is saved, which is deliberate: Item::SetState() resolves the owner GUID via
+            // ObjectAccessor and would queue a client update against that character. Leaving the
+            // owner unset until every field has been populated keeps that from touching a seller
+            // who happens to be online.
+            Item* item = Item::CreateItem(itemID, 1, nullptr);
             if (item == NULL)
             {
                 if (debug_Out)
                     LOG_ERROR("module", "AHSeller: Item::CreateItem() returned NULL");
                 break;
             }
-            item->AddToUpdateQueueOf(AHBplayer);
 
             uint32 randomPropertyId = Item::GenerateItemRandomPropertyId(itemID);
             if (randomPropertyId != 0)
@@ -1181,15 +1190,17 @@ void AuctionHouseBot::AddNewAuctions(std::vector<Player*> AHBPlayers, FactionSpe
             auctionEntry->item_guid = item->GetGUID();
             auctionEntry->item_template = item->GetEntry();
             auctionEntry->itemCount = item->GetCount();
-            auctionEntry->owner = AHBplayer->GetGUID();
+            auctionEntry->owner = sellerGUID;
             auctionEntry->startbid = bidPrice * stackCount;
             auctionEntry->buyout = buyoutPrice * stackCount;
             auctionEntry->bid = 0;
             auctionEntry->deposit = dep;
             auctionEntry->expire_time = (time_t) etime + time(NULL);
             auctionEntry->auctionHouseEntry = ahEntry;
+
+            // Assigned last, so that no field mutation above can resolve this GUID to a live Player
+            item->SetOwnerGUID(sellerGUID);
             item->SaveToDB(trans);
-            item->RemoveFromUpdateQueueOf(AHBplayer);
             sAuctionMgr->AddAItem(item);
             auctionHouse->AddAuction(auctionEntry);
             auctionEntry->SaveToDB(trans);
@@ -1882,56 +1893,74 @@ void AuctionHouseBot::Update()
     if (!buyReady && !sellReady)
         return;
     
-    // Load all AH Bot Players
-    std::vector<std::pair<std::unique_ptr<Player>, std::unique_ptr<WorldSession>>> AHBPlayers;
-    AHBPlayers.reserve(AHCharacters.size());
-    for (uint32 botIndex = 0; botIndex < AHCharacters.size(); ++botIndex)
+    // Refresh the seller pool, as the set of bot characters changes as the pool is resized
+    if (UsePlayerbotNames == true)
     {
-        CurrentBotCharGUID = AHCharacters[botIndex].CharacterGUID;
-        std::string accountName = "AuctionHouseBot" + std::to_string(AHCharacters[botIndex].AccountID);
-
-        // Wrap session and player in unique pointer to manage lifetime
-        auto session = std::make_unique<WorldSession>(
-            AHCharacters[botIndex].AccountID, std::move(accountName), 0, nullptr,
-            SEC_PLAYER, sWorld->getIntConfig(CONFIG_EXPANSION), 0, LOCALE_enUS, 0, false, false, 0
-        );
-        auto player = std::make_unique<Player>(session.get());
-        player->Initialize(AHCharacters[botIndex].CharacterGUID);
-        ObjectAccessor::AddObject(player.get());
-        AHBPlayers.emplace_back(std::move(player), std::move(session));
+        AddCharactersFromAccountPrefix(PlayerbotAccountPrefix);
+        if (AHCharacters.empty() == true)
+            return;
     }
 
-    // Create a vector of Player* for passing to methods
-    std::vector<Player*> playersPointerVector;
-    playersPointerVector.reserve(AHBPlayers.size());
-    for (const auto& pair : AHBPlayers)
-        playersPointerVector.emplace_back(pair.first.get());
+    // Listing only needs owner GUIDs, so no Player is instantiated for the selling bot. This keeps
+    // characters that may already be online (such as bots) from having their ObjectAccessor entry
+    // replaced and then erased by a temporary stand-in.
+    std::vector<ObjectGuid> sellerGUIDs;
+    sellerGUIDs.reserve(AHCharacters.size());
+    for (uint32 botIndex = 0; botIndex < AHCharacters.size(); ++botIndex)
+        sellerGUIDs.emplace_back(ObjectGuid::Create<HighGuid::Player>(AHCharacters[botIndex].CharacterGUID));
 
-     // List New Auctions
-     if (sellReady) 
-     {
-         if (sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_AUCTION) == false)
-         {
-             AddNewAuctions(playersPointerVector, &AllianceConfig);
-             AddNewAuctions(playersPointerVector, &HordeConfig);
-         }
-         AddNewAuctions(playersPointerVector, &NeutralConfig);
-     }
+    // List New Auctions
+    if (sellReady)
+    {
+        if (sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_AUCTION) == false)
+        {
+            AddNewAuctions(sellerGUIDs, &AllianceConfig);
+            AddNewAuctions(sellerGUIDs, &HordeConfig);
+        }
+        AddNewAuctions(sellerGUIDs, &NeutralConfig);
+    }
 
-     // Place New Bids
-     if (buyReady && BuyingBotBuyCandidatesPerBuyCycleMin > 0) 
-     {
-         if (sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_AUCTION) == false)
-         {
-             AddNewAuctionBuyerBotBid(playersPointerVector, &AllianceConfig);
-             AddNewAuctionBuyerBotBid(playersPointerVector, &HordeConfig);
-         }
-         AddNewAuctionBuyerBotBid(playersPointerVector, &NeutralConfig);
-     }
+    // Place New Bids
+    if (buyReady && BuyingBotBuyCandidatesPerBuyCycleMin > 0)
+    {
+        // Unlike listing, bidding calls SendAuctionOutbiddedMail(), which requires a Player. These
+        // stand-ins are only safe because the buying bot cannot be combined with a pool of
+        // potentially online bot characters (enforced in InitializeConfiguration).
+        std::vector<std::pair<std::unique_ptr<Player>, std::unique_ptr<WorldSession>>> AHBPlayers;
+        AHBPlayers.reserve(AHCharacters.size());
+        for (uint32 botIndex = 0; botIndex < AHCharacters.size(); ++botIndex)
+        {
+            CurrentBotCharGUID = AHCharacters[botIndex].CharacterGUID;
+            std::string accountName = "AuctionHouseBot" + std::to_string(AHCharacters[botIndex].AccountID);
 
-    // Remove AH Bot Players from world
-    for (auto& [player, session] : AHBPlayers)
-        ObjectAccessor::RemoveObject(player.get());
+            // Wrap session and player in unique pointer to manage lifetime
+            auto session = std::make_unique<WorldSession>(
+                AHCharacters[botIndex].AccountID, std::move(accountName), 0, nullptr,
+                SEC_PLAYER, sWorld->getIntConfig(CONFIG_EXPANSION), 0, LOCALE_enUS, 0, false, false, 0
+            );
+            auto player = std::make_unique<Player>(session.get());
+            player->Initialize(AHCharacters[botIndex].CharacterGUID);
+            ObjectAccessor::AddObject(player.get());
+            AHBPlayers.emplace_back(std::move(player), std::move(session));
+        }
+
+        // Create a vector of Player* for passing to methods
+        std::vector<Player*> playersPointerVector;
+        playersPointerVector.reserve(AHBPlayers.size());
+        for (const auto& pair : AHBPlayers)
+            playersPointerVector.emplace_back(pair.first.get());
+
+        if (sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_AUCTION) == false)
+        {
+            AddNewAuctionBuyerBotBid(playersPointerVector, &AllianceConfig);
+            AddNewAuctionBuyerBotBid(playersPointerVector, &HordeConfig);
+        }
+        AddNewAuctionBuyerBotBid(playersPointerVector, &NeutralConfig);
+
+        // Remove AH Bot Players from world
+        for (auto& [player, session] : AHBPlayers)
+            ObjectAccessor::RemoveObject(player.get());
+    }
 }
 
 bool AuctionHouseBot::IsModuleEnabled()
@@ -1940,6 +1969,11 @@ bool AuctionHouseBot::IsModuleEnabled()
     bool buyerEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.Buyer.Enabled", false);
     if (sellerEnabled == false && buyerEnabled == false)
         return false;
+    // Seller characters come from either an explicit GUID list or an account prefix pool, so
+    // only require AuctionHouseBot.GUIDs when the prefix pool is not in use
+    if (sConfigMgr->GetOption<bool>("AuctionHouseBot.UsePlayerbotNames", false) == true)
+        return true;
+
     string charString = sConfigMgr->GetOption<std::string>("AuctionHouseBot.GUIDs", "0");
     if (charString == "0" || charString.empty())
     {
@@ -1957,8 +1991,37 @@ void AuctionHouseBot::InitializeConfiguration()
     SellingBotEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.EnableSeller", false);
     BuyingBotEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.Buyer.Enabled", false);
 
-    string charString = sConfigMgr->GetOption<std::string>("AuctionHouseBot.GUIDs", "0");
-    AddCharacters(charString);
+    // Seller characters may either be explicitly configured, or sourced from a pool of accounts
+    // sharing a common username prefix (see AuctionHouseBot.UsePlayerbotNames)
+    UsePlayerbotNames = sConfigMgr->GetOption<bool>("AuctionHouseBot.UsePlayerbotNames", false);
+    if (UsePlayerbotNames == true)
+    {
+        // Probe silently. When a bot module is not installed this option will simply not exist,
+        // and passing showLogs = false keeps that from being reported as a missing config error.
+        PlayerbotAccountPrefix = sConfigMgr->GetOption<std::string>("AiPlayerbot.RandomBotAccountPrefix", "", false);
+        if (PlayerbotAccountPrefix.empty() == true)
+        {
+            LOG_WARN("module", "AuctionHouseBot: UsePlayerbotNames is enabled, but no bot account prefix could be detected (AiPlayerbot.RandomBotAccountPrefix). Falling back to AuctionHouseBot.GUIDs.");
+            UsePlayerbotNames = false;
+        }
+    }
+
+    // Bot characters are frequently online, and the buying bot must instantiate a Player for each
+    // seller in order to satisfy SendAuctionOutbiddedMail(). Doing that for an already-online
+    // character corrupts its ObjectAccessor registration, so the two cannot be combined.
+    if ((UsePlayerbotNames == true) && (BuyingBotEnabled == true))
+    {
+        LOG_ERROR("module", "AuctionHouseBot: AuctionHouseBot.Buyer.Enabled cannot be used together with AuctionHouseBot.UsePlayerbotNames, as bot characters may be online. Disabling the buying bot.");
+        BuyingBotEnabled = false;
+    }
+
+    if (UsePlayerbotNames == true)
+        AddCharactersFromAccountPrefix(PlayerbotAccountPrefix);
+    else
+    {
+        string charString = sConfigMgr->GetOption<std::string>("AuctionHouseBot.GUIDs", "0");
+        AddCharacters(charString);
+    }
 
     // Top level overrides
     CompleteItemValueOverrideEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.CompleteItemValueOverride.Enabled", false);
@@ -2399,7 +2462,73 @@ void AuctionHouseBot::AddCharacters(std::string characterGUIDString)
         LOG_ERROR("module", "AuctionHouseBot: No character GUIDs were supplied. Be sure to set AuctionHouseBot.GUIDs");
         return;
     }
+
+    LoadCharactersFromGUIDSet(characterGUIDs, "AuctionHouseBot.GUIDs");
+}
+
+void AuctionHouseBot::AddCharactersFromAccountPrefix(std::string accountPrefix)
+{
+    AHCharacters.clear();
     AHCharactersGUIDsForQuery = "";
+
+    // Account usernames are stored upper cased, so match against an upper cased prefix. This keeps
+    // the lookup correct even on installations using a case sensitive collation.
+    std::string upperAccountPrefix = accountPrefix;
+    std::transform(upperAccountPrefix.begin(), upperAccountPrefix.end(), upperAccountPrefix.begin(),
+        [](unsigned char curChar) { return std::toupper(curChar); });
+
+    // Accounts live in the auth database while characters live in the character database, so this
+    // cannot be resolved with a single join
+    QueryResult accountResult = LoginDatabase.Query("SELECT `id` FROM `account` WHERE `username` LIKE '{}%%'", upperAccountPrefix);
+    if (!accountResult || accountResult->GetRowCount() == 0)
+    {
+        LOG_WARN("module", "AuctionHouseBot: No accounts were found matching the prefix '{}', so no auctions will be listed this cycle.", accountPrefix);
+        return;
+    }
+
+    std::string accountIDsForQuery = "";
+    bool first = true;
+    do
+    {
+        Field* fields = accountResult->Fetch();
+        if (first == false)
+            accountIDsForQuery += ", ";
+        accountIDsForQuery += std::to_string(fields[0].Get<uint32>());
+        first = false;
+    } while (accountResult->NextRow());
+
+    // Characters pending deletion are excluded, as their auctions would be orphaned
+    QueryResult characterResult = CharacterDatabase.Query("SELECT `guid`, `account` FROM `characters` WHERE `account` IN ({}) AND `deleteDate` IS NULL", accountIDsForQuery);
+    if (!characterResult || characterResult->GetRowCount() == 0)
+    {
+        LOG_WARN("module", "AuctionHouseBot: Accounts matching the prefix '{}' exist, but contain no characters, so no auctions will be listed this cycle.", accountPrefix);
+        return;
+    }
+
+    first = true;
+    do
+    {
+        Field* fields = characterResult->Fetch();
+        uint32 guid = fields[0].Get<uint32>();
+        uint32 account = fields[1].Get<uint32>();
+
+        if (first == false)
+            AHCharactersGUIDsForQuery += ", ";
+        AHCharactersGUIDsForQuery += std::to_string(guid);
+        first = false;
+
+        AHCharacters.push_back(AuctionHouseBotCharacter(account, guid));
+    } while (characterResult->NextRow());
+
+    if (debug_Out)
+        LOG_INFO("module", "AuctionHouseBot: Resolved {} seller character(s) from accounts matching the prefix '{}'", AHCharacters.size(), accountPrefix);
+}
+
+void AuctionHouseBot::LoadCharactersFromGUIDSet(std::set<uint32> const& characterGUIDs, const char* sourceDescription)
+{
+    AHCharacters.clear();
+    AHCharactersGUIDsForQuery = "";
+
     bool first = true;
     for (uint32 curGUID : characterGUIDs)
     {
@@ -2410,10 +2539,12 @@ void AuctionHouseBot::AddCharacters(std::string characterGUIDString)
         AHCharactersGUIDsForQuery += std::to_string(curGUID);
         first = false;
     }
+
     QueryResult queryResult = CharacterDatabase.Query("SELECT `guid`, `account` FROM `characters` WHERE guid IN ({})", AHCharactersGUIDsForQuery);
     if (!queryResult || queryResult->GetRowCount() == 0)
     {
-        LOG_ERROR("module", "AuctionHouseBot: No character GUIDs found when looking up values from AuctionHouseBot.GUIDs from the character database 'characters.guid'.");
+        LOG_ERROR("module", "AuctionHouseBot: No character GUIDs found when looking up values from {} from the character database 'characters.guid'.", sourceDescription);
+        AHCharactersGUIDsForQuery = "";
         return;
     }
     do

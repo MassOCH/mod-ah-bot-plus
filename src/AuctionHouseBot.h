@@ -128,6 +128,8 @@ private:
 
     bool SellingBotEnabled;
     bool BuyingBotEnabled;
+    bool UsePlayerbotNames;
+    std::string PlayerbotAccountPrefix;
     bool ReturnExpiredAuctionItemsToBot;
     uint32 CyclesBetweenBuyActionMin;
     uint32 CyclesBetweenBuyAction;
@@ -354,6 +356,8 @@ public:
     void SetBuyingBotBuyCandidatesPerBuyCycle();
     void GetConfigMinAndMax(std::string config, uint32& min, uint32& max);
     void AddCharacters(std::string characterGUIDString);
+    void AddCharactersFromAccountPrefix(std::string accountPrefix);
+    void LoadCharactersFromGUIDSet(std::set<uint32> const& characterGUIDs, const char* sourceDescription);
     void ParseNumberListToSet(std::set<uint32>& workingItemIDSet, std::string itemString, const char* parentOperationName);
     void AddToNumberListSet(std::set<uint32>& workingItemIDSet, uint32 itemID, const char* parentOperationName);
     const char* GetQualityName(ItemQualities quality);
@@ -376,7 +380,7 @@ public:
     bool IsItemADisabledRecipeProducedClassSubclass(ItemTemplate const* itemTemplate);
     void PopulateItemCandidatesAndProportions();
     uint32 GetRandomItemIDForListing();
-    void AddNewAuctions(std::vector<Player*> AHBPlayers, FactionSpecificAuctionHouseConfig* config);
+    void AddNewAuctions(std::vector<ObjectGuid> const& sellerGUIDs, FactionSpecificAuctionHouseConfig* config);
     void AddNewAuctionBuyerBotBid(std::vector<Player*> AHBPlayers, FactionSpecificAuctionHouseConfig* config);
     void PopulateVendorItemsPrices();
     void CleanupExpiredAuctionItems();

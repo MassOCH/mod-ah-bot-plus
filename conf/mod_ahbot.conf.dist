@@ -52,10 +52,32 @@
 #        It can be a single value or multiple values that are separated by a
 #        comma (do not have spaces!).  Note: a GUID of "0" will be ignored!
 #        Important: Do not use a bot character (such as playerbot bots)
-#        or it will likely crash the server
+#        or it will likely crash the server, unless
+#        AuctionHouseBot.UsePlayerbotNames is enabled (see below).
+#        Ignored entirely when AuctionHouseBot.UsePlayerbotNames is enabled.
 #    Examples:
 #        AuctionHouseBot.GUIDs = 3 <- Only character with GUID 3
 #        AuctionHouseBot.GUIDs = 3,4 <- Both characters with GUID 3 and 4
+#
+#    AuctionHouseBot.UsePlayerbotNames
+#        When enabled, seller characters are sourced from every account whose
+#        username begins with the bot account prefix, instead of from
+#        AuctionHouseBot.GUIDs. The prefix is read from the bot module's own
+#        configuration (AiPlayerbot.RandomBotAccountPrefix), so it never needs
+#        to be repeated here and cannot fall out of sync.
+#        This makes listings appear to come from the same characters players
+#        see in the world, rather than from dedicated auction-only characters.
+#        The seller pool is re-read every sell cycle, so characters added to or
+#        removed from the pool are picked up automatically.
+#        Safe to use with online characters: listing assigns owner GUIDs
+#        directly and never creates a stand-in Player.
+#        If no bot module is installed, this falls back to
+#        AuctionHouseBot.GUIDs with a warning rather than failing.
+#        Note: This cannot be combined with AuctionHouseBot.Buyer.Enabled,
+#        because bidding requires a stand-in Player which is unsafe for
+#        characters that may be online. The buying bot will be disabled if both
+#        are turned on.
+#    Default: false (disabled)
 #
 #    AuctionHouseBot.ItemsPerCycle
 #        How many items to post on the auction house every house update.
@@ -77,6 +99,7 @@ AuctionHouseBot.MinutesBetweenSellCycle = 1
 AuctionHouseBot.EnableSeller = false
 AuctionHouseBot.ReturnExpiredAuctionItemsToBot = false
 AuctionHouseBot.GUIDs = 0
+AuctionHouseBot.UsePlayerbotNames = false
 AuctionHouseBot.ItemsPerCycle = 150
 AuctionHouseBot.ListingExpireTimeInSecondsMin = 900
 AuctionHouseBot.ListingExpireTimeInSecondsMax = 86400
