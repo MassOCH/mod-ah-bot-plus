@@ -58,19 +58,12 @@ class AHBot_AuctionHouseScript : public AuctionHouseScript
 public:
     AHBot_AuctionHouseScript() : AuctionHouseScript("AHBot_AuctionHouseScript") { }
 
+
     void OnBeforeAuctionHouseMgrSendAuctionSuccessfulMail(AuctionHouseMgr* /*auctionHouseMgr*/, AuctionEntry* /*auction*/, Player* owner, uint32& /*owner_accId*/, uint32& /*profit*/, bool& sendNotification, bool& updateAchievementCriteria, bool& /*sendMail*/) override
     {
         if (owner)
         {
-            bool isAHBot = false;
-            for (AuctionHouseBotCharacter character : auctionbot->AHCharacters)
-            {
-                if (character.CharacterGUID == owner->GetGUID().GetCounter())
-                {
-                    isAHBot = true;
-                    break;
-                }
-            }
+            bool isAHBot = auctionbot->IsSellerCharacter(owner->GetGUID());
             if (isAHBot == true)
             {
                 sendNotification = false;
@@ -83,15 +76,7 @@ public:
     {
         if (owner)
         {
-            bool isAHBot = false;
-            for (AuctionHouseBotCharacter character : auctionbot->AHCharacters)
-            {
-                if (character.CharacterGUID == owner->GetGUID().GetCounter())
-                {
-                    isAHBot = true;
-                    break;
-                }
-            }
+            bool isAHBot = auctionbot->IsSellerCharacter(owner->GetGUID());
             if (isAHBot == true)
             {
                 sendNotification = false;
@@ -116,15 +101,7 @@ public:
         // so suppress the paths that would touch that missing state when it wins an auction
         if (bidder)
         {
-            bool isAHBot = false;
-            for (AuctionHouseBotCharacter character : auctionbot->AHCharacters)
-            {
-                if (character.CharacterGUID == bidder->GetGUID().GetCounter())
-                {
-                    isAHBot = true;
-                    break;
-                }
-            }
+            bool isAHBot = auctionbot->IsSellerCharacter(bidder->GetGUID());
             if (isAHBot == true)
             {
                 sendNotification = false;
@@ -146,15 +123,8 @@ public:
 
     void OnBeforeMailDraftSendMailTo(MailDraft* /*mailDraft*/, MailReceiver const& receiver, MailSender const& sender, MailCheckMask& /*checked*/, uint32& /*deliver_delay*/, uint32& /*custom_expiration*/, bool& deleteMailItemsFromDB, bool& sendMail) override
     {
-        bool isAHBot = false;
-        for (AuctionHouseBotCharacter character : auctionbot->AHCharacters)
-        {
-            if (character.CharacterGUID == receiver.GetPlayerGUIDLow())
-            {
-                isAHBot = true;
-                break;
-            }
-        }
+        // Runs for every mail sent on the server, so this must not scan the seller list
+        bool isAHBot = auctionbot->IsSellerCharacter(receiver.GetPlayerGUIDLow());
         if (isAHBot == true)
         {
             if (sConfigMgr->GetOption<bool>("AuctionHouseBot.ReturnExpiredAuctionItemsToBot", false))

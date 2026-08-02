@@ -25,6 +25,7 @@
 #include "ObjectGuid.h"
 
 #include <map>
+#include <unordered_set>
 #include <vector>
 
 struct AuctionEntry;
@@ -122,6 +123,20 @@ public:
     std::vector<AuctionHouseBotCharacter> AHCharacters;
     uint32 CurrentBotCharGUID;
 
+    // Membership test for the seller pool. Kept as a set because the hooks below run for every
+    // mail and every auction on the server, and a seller pool sourced from an account prefix can
+    // hold thousands of characters. Takes a GUID rather than a Player so that it also resolves for
+    // sellers that are not online.
+    [[nodiscard]] bool IsSellerCharacter(ObjectGuid const& guid) const
+    {
+        return AHCharacterGUIDs.find(guid.GetCounter()) != AHCharacterGUIDs.end();
+    }
+    [[nodiscard]] bool IsSellerCharacter(ObjectGuid::LowType guidLow) const
+    {
+        return AHCharacterGUIDs.find(guidLow) != AHCharacterGUIDs.end();
+    }
+
+
 private:
     bool debug_Out;
     bool debug_Out_Filters;
@@ -157,6 +172,7 @@ private:
     bool BuyingBotWillBidAgainstPlayers;
     std::vector<uint32> vendorItemsPrices;
     std::string AHCharactersGUIDsForQuery;
+    std::unordered_set<ObjectGuid::LowType> AHCharacterGUIDs;
     uint32 ItemsPerCycle;
     bool DisabledItemTextFilter;
     bool DisabledRecipeProducedItemFilterEnabled;

@@ -1921,11 +1921,24 @@ void AuctionHouseBot::Update()
     }
 
     // Place New Bids
-    if (buyReady && BuyingBotBuyCandidatesPerBuyCycleMin > 0)
+    //
+    // BuyingBotEnabled must be part of this condition. The stand-in Players below are registered
+    // with ObjectAccessor under the seller GUIDs, which replaces and then erases the entry of any
+    // character that is genuinely online. Building them for a disabled buyer corrupts live
+    // characters for no reason at all, and the config level guard against combining the buying bot
+    // with an account pool only clears BuyingBotEnabled, so it does nothing unless it is read here.
+    if (BuyingBotEnabled && buyReady && BuyingBotBuyCandidatesPerBuyCycleMin > 0)
     {
-        // Unlike listing, bidding calls SendAuctionOutbiddedMail(), which requires a Player. These
-        // stand-ins are only safe because the buying bot cannot be combined with a pool of
-        // potentially online bot characters (enforced in InitializeConfiguration).
+        // Checked again here rather than trusting the config load guard alone. Registering
+        // stand-in Players over characters that may be online is the only thing this module does
+        // that can corrupt live game state, and it is worth refusing twice.
+        if (UsePlayerbotNames == true)
+        {
+            LOG_ERROR("module", "AuctionHouseBot: Refusing to create stand-in Players for the buying bot because AuctionHouseBot.UsePlayerbotNames is enabled. Seller characters may be online, and registering stand-ins over them corrupts their state.");
+            return;
+        }
+
+        // Unlike listing, bidding calls SendAuctionOutbiddedMail(), which requires a Player.
         std::vector<std::pair<std::unique_ptr<Player>, std::unique_ptr<WorldSession>>> AHBPlayers;
         AHBPlayers.reserve(AHCharacters.size());
         for (uint32 botIndex = 0; botIndex < AHCharacters.size(); ++botIndex)
@@ -2433,6 +2446,7 @@ void AuctionHouseBot::GetConfigMinAndMax(std::string config, uint32& min, uint32
 void AuctionHouseBot::AddCharacters(std::string characterGUIDString)
 {
     AHCharacters.clear();
+    AHCharacterGUIDs.clear();
     std::string delimitedValue;
     std::stringstream characterGUIDStream;
     std::set<uint32> characterGUIDs;
@@ -2469,6 +2483,7 @@ void AuctionHouseBot::AddCharacters(std::string characterGUIDString)
 void AuctionHouseBot::AddCharactersFromAccountPrefix(std::string accountPrefix)
 {
     AHCharacters.clear();
+    AHCharacterGUIDs.clear();
     AHCharactersGUIDsForQuery = "";
 
     // Account usernames are stored upper cased, so match against an upper cased prefix. This keeps
@@ -2518,6 +2533,7 @@ void AuctionHouseBot::AddCharactersFromAccountPrefix(std::string accountPrefix)
         first = false;
 
         AHCharacters.push_back(AuctionHouseBotCharacter(account, guid));
+        AHCharacterGUIDs.insert(guid);
     } while (characterResult->NextRow());
 
     if (debug_Out)
@@ -2527,6 +2543,7 @@ void AuctionHouseBot::AddCharactersFromAccountPrefix(std::string accountPrefix)
 void AuctionHouseBot::LoadCharactersFromGUIDSet(std::set<uint32> const& characterGUIDs, const char* sourceDescription)
 {
     AHCharacters.clear();
+    AHCharacterGUIDs.clear();
     AHCharactersGUIDsForQuery = "";
 
     bool first = true;
@@ -2555,6 +2572,7 @@ void AuctionHouseBot::LoadCharactersFromGUIDSet(std::set<uint32> const& characte
         uint32 account = fields[1].Get<uint32>();
         AuctionHouseBotCharacter curChar = AuctionHouseBotCharacter(account, guid);
         AHCharacters.push_back(curChar);
+        AHCharacterGUIDs.insert(guid);
     } while (queryResult->NextRow());
 }
 
@@ -2745,6 +2763,27 @@ void AuctionHouseBot::CleanupExpiredAuctionItems()
     if (AHCharactersGUIDsForQuery.empty() ||
         ReturnExpiredAuctionItemsToBot)
         return;
+
+    // Only safe when every seller is a dedicated auction character that owns nothing else. A seller
+    // pool sourced from an account prefix contains real characters whose gear and bags would all
+    // match "owned by a seller and not currently in an auction", so the sweep is skipped there.
+    // Items behind expired listings are already removed through the expired mail path, which
+    // deletes them when the bot's mail is suppressed, so nothing is leaked by skipping this.
+    if (UsePlayerbotNames == true)
+    {
+        LOG_INFO("module", "AuctionHouseBot: Skipping the bulk orphaned item sweep because sellers come from an account pool. Expired listing items are removed through the expired mail path instead.");
+        return;
+    }
+
+    // This deletes every item owned by a seller that is not currently in an auction. That is only
+    // a safe assumption for dedicated auction characters, which own nothing else. When sellers are
+    // sourced from a pool of real characters they have their own equipment and inventory, and this
+    // would destroy all of it.
+    if (UsePlayerbotNames == true)
+    {
+        LOG_INFO("module", "AuctionHouseBot: Skipping orphaned item cleanup because AuctionHouseBot.UsePlayerbotNames is enabled. Seller characters own items unrelated to the auction house, and those must not be deleted.");
+        return;
+    }
 
     // Delete item_instances that are not in the Auction Houses
     std::string queryItemInstancesString = R"SQL(
